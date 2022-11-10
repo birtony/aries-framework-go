@@ -7,11 +7,14 @@ SPDX-License-Identifier: Apache-2.0
 package middleware
 
 import (
+	"encoding/json"
 	"fmt"
-	"testing"
-
 	"github.com/google/uuid"
+	"github.com/hyperledger/aries-framework-go/pkg/doc/jose/jwk/jwksupport"
+	"github.com/hyperledger/aries-framework-go/pkg/vdr/fingerprint"
+	"github.com/hyperledger/aries-framework-go/pkg/vdr/key"
 	"github.com/stretchr/testify/require"
+	"testing"
 
 	"github.com/hyperledger/aries-framework-go/pkg/crypto"
 	"github.com/hyperledger/aries-framework-go/pkg/crypto/tinkcrypto"
@@ -786,6 +789,90 @@ func TestDIDRotator_Create(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "creating DID rotation JWS")
 	})
+}
+
+func TestGenerateDummyJWT(t *testing.T) {
+	kmsStore, err := kms.NewAriesProviderWrapper(mockstorage.NewMockStoreProvider())
+	require.NoError(t, err)
+
+	keyManager, err := localkms.New("local-lock://test/master/key/", &kmsProvider{
+		kmsStore:          kmsStore,
+		secretLockService: &noop.NoLock{},
+	})
+	require.NoError(t, err)
+
+	internalKeyID, keyHandle, err := keyManager.Create(kms.ECDSAP256TypeIEEEP1363)
+
+	pubKeyBytes, _, err := keyManager.ExportPubKeyBytes(internalKeyID)
+	require.NoError(t, err)
+
+	pubJWK, err := jwksupport.PubKeyBytesToJWK(pubKeyBytes, kms.ECDSAP256TypeIEEEP1363)
+	require.NoError(t, err)
+
+	verifierDID, _, err := fingerprint.CreateDIDKeyByJwk(pubJWK)
+	require.NoError(t, err)
+
+	keyVDR := key.New()
+
+	docRes, err := keyVDR.Read(verifierDID)
+	require.NoError(t, err)
+
+	docBytes, err := json.MarshalIndent(docRes.DIDDocument, "", " ")
+	require.NoError(t, err)
+
+	fmt.Println(string(docBytes))
+
+	protected := jose.Headers(map[string]interface{}{
+		"typ": "JWT",
+		"alg": "ES256",
+		"crv": "P-256",
+		"kid": verifierDID,
+	})
+
+	payloadBytes := []byte(`
+		{
+          "nonce": "O1mZGnuet++Ilg2c1jR4jA==",
+          "client_id": "did:ion:EiAv0eJ5cB0hGWVH5YbY-uw1K71EpOST6ztueEQzVCEc0A:eyJkZWx0YSI6eyJwYXRjaGVzIjpbeyJhY3Rpb24iOiJyZXBsYWNlIiwiZG9jdW1lbnQiOnsicHVibGljS2V5cyI6W3siaWQiOiJzaWdfY2FiNjVhYTAiLCJwdWJsaWNLZXlKd2siOnsiY3J2Ijoic2VjcDI1NmsxIiwia3R5IjoiRUMiLCJ4IjoiOG15MHFKUGt6OVNRRTkyRTlmRFg4ZjJ4bTR2X29ZMXdNTEpWWlQ1SzhRdyIsInkiOiIxb0xsVG5rNzM2RTNHOUNNUTh3WjJQSlVBM0phVnY5VzFaVGVGSmJRWTFFIn0sInB1cnBvc2VzIjpbImF1dGhlbnRpY2F0aW9uIiwiYXNzZXJ0aW9uTWV0aG9kIl0sInR5cGUiOiJFY2RzYVNlY3AyNTZrMVZlcmlmaWNhdGlvbktleTIwMTkifV0sInNlcnZpY2VzIjpbeyJpZCI6ImxpbmtlZGRvbWFpbnMiLCJzZXJ2aWNlRW5kcG9pbnQiOnsib3JpZ2lucyI6WyJodHRwczovL3N3ZWVwc3Rha2VzLmRpZC5taWNyb3NvZnQuY29tLyJdfSwidHlwZSI6IkxpbmtlZERvbWFpbnMifV19fV0sInVwZGF0ZUNvbW1pdG1lbnQiOiJFaUFwcmVTNy1Eczh5MDFnUzk2cE5iVnpoRmYxUlpvblZ3UkswbG9mZHdOZ2FBIn0sInN1ZmZpeERhdGEiOnsiZGVsdGFIYXNoIjoiRWlEMWRFdUVldERnMnhiVEs0UDZVTTNuWENKVnFMRE11M29IVWNMamtZMWFTdyIsInJlY292ZXJ5Q29tbWl0bWVudCI6IkVpREFkSzFWNkpja1BpY0RBcGFxV2IyZE95MFRNcmJKTmllNmlKVzk4Zk54bkEifX0",
+          "redirect_uri": "https://beta.did.msidentity.com/v1.0/e1f66f2e-c050-4308-81b3-3d7ea7ef3b1b/verifiablecredentials/present",
+		  "claims": {
+			"vp_token": {
+			  "id": "22c77155-edf2-4ec5-8d44-b393b4e4fa38",
+			  "input_descriptors": [
+				{
+				  "id": "20b073bb-cede-4912-9e9d-334e5702077b",
+				  "schema": [
+					{
+					  "uri": "https://www.w3.org/2018/credentials#VerifiableCredential"
+					}
+				  ],
+				  "constraints": {
+					"fields": [
+					  {
+						"path": [
+						  "$.credentialSubject.familyName"
+						]
+					  }
+					]
+				  }
+				}
+			  ]
+			}
+		  }
+		}
+	`)
+
+	cr, err := tinkcrypto.New()
+	require.NoError(t, err)
+
+	jws, err := jose.NewJWS(protected, nil, payloadBytes, &cryptoSigner{kh: keyHandle, crypto: cr})
+	require.NoError(t, err)
+
+	fmt.Println(jws)
+
+	serializeJWS, err := jws.SerializeCompact(false)
+	require.NoError(t, err)
+
+	fmt.Println(serializeJWS)
 }
 
 func TestDIDRotator_CreateVerify(t *testing.T) {
